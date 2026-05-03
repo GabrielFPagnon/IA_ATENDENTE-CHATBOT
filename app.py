@@ -9,7 +9,7 @@ def get_connection():
         port=5432,
         database="chatbot",
         user="postgres",
-        password="sua_senha"
+        password="postgres"
     )
 
 # Cliente Gemini
@@ -17,20 +17,11 @@ client = genai.Client(api_key="")
 
 # ── INSERÇÕES ──────────────────────────────────────────
 
-def cadastrar_cliente(nome, contato):
+def cadastrar_cliente(nome, email, senha_hash):
     with get_connection() as conn:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute(
-                "INSERT INTO clientes (nome, contato) VALUES (%s, %s) RETURNING *",
-                (nome, contato)
-            )
-            return cur.fetchone()
-
-def cadastrar_usuario(nome, email, senha_hash):
-    with get_connection() as conn:
-        with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            cur.execute(
-                "INSERT INTO usuarios (nome, email, senha) VALUES (%s, %s, %s) RETURNING *",
+                "INSERT INTO clientes (nome, email, senha) VALUES (%s, %s, %s) RETURNING *",
                 (nome, email, senha_hash)
             )
             return cur.fetchone()
@@ -79,3 +70,30 @@ def cadastrar_produto(nome, descricao, categoria, preco, quantidade_estoque):
                 (nome, descricao, categoria, preco, quantidade_estoque)
             )
             return cur.fetchone()
+        
+# ── BUSCAS ──────────────────────────────────────────
+
+def buscar_produtos(palavras_chave):
+    with get_connection() as conn:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            filtros = " OR ".join(
+                [f"descricao ILIKE %s OR categoria ILIKE %s" for _ in palavras_chave]
+            )
+            valores = [val for p in palavras_chave for val in (f"%{p}%", f"%{p}%")]
+            cur.execute(
+                f"SELECT * FROM produtos WHERE ({filtros}) AND quantidade_estoque > 0 AND ativo = TRUE",
+                valores
+            )
+            return cur.fetchall()
+
+def buscar_historico(cliente_id):
+    with get_connection() as conn:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute("""
+                SELECT m.remetente, m.conteudo, m.enviada_em
+                FROM mensagens m
+                JOIN conversas c ON c.id = m.conversa_id
+                WHERE c.cliente_id = %s
+                ORDER BY m.enviada_em ASC
+            """, (cliente_id,))
+            return cur.fetchall()
