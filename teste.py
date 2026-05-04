@@ -3,7 +3,7 @@
 from app import cadastrar_cliente, iniciar_conversa, salvar_mensagem, buscar_produtos
 
 # Testa cadastro de cliente
-cliente = cadastrar_cliente("João", "joao2@email.com", "senha1234")
+cliente = cadastrar_cliente("João", "joao3@email.com", "senha2234")
 print("Cliente:", cliente)
 
 # Testa iniciar conversa
