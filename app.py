@@ -1,8 +1,12 @@
 import psycopg2
 from psycopg2.extras import RealDictCursor
-from google import genai
+from langchain_google_genai import ChatGoogleGenerativeAI
+from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
+from langchain_core.chat_history import InMemoryChatMessageHistory
+from langchain_core.runnables.history import RunnableWithMessageHistory
 
-# Conexão com o banco
+# ── CONEXÃO ───────────────────────────────────────────
+
 def get_connection():
     return psycopg2.connect(
         host="localhost",
@@ -12,10 +16,57 @@ def get_connection():
         password="postgres"
     )
 
-# Cliente Gemini
-client = genai.Client(api_key="")
+# ── MODELO LANGCHAIN ──────────────────────────────────
 
-# ── INSERÇÕES ──────────────────────────────────────────
+llm = ChatGoogleGenerativeAI(
+    model="gemini-1.5-flash",
+    google_api_key="",
+    temperature=0.7
+)
+
+# Histórico por sessão (conversa_id → histórico)
+store = {}
+
+def get_session_history(session_id: str) -> InMemoryChatMessageHistory:
+    if session_id not in store:
+        store[session_id] = InMemoryChatMessageHistory()
+    return store[session_id]
+
+# Chain com memória
+atendente = RunnableWithMessageHistory(llm, get_session_history)
+
+# ── FUNÇÃO PRINCIPAL DE CHAT ──────────────────────────
+
+def chat(conversa_id: int, mensagem_usuario: str, system_prompt: str = None):
+    """
+    Envia mensagem para o atendente e salva no banco.
+    Retorna a resposta do modelo.
+    """
+    # Salva mensagem do usuário no banco
+    salvar_mensagem(conversa_id, "cliente", mensagem_usuario)
+
+    # Monta config da sessão
+    config = {"configurable": {"session_id": str(conversa_id)}}
+
+    # Injeta system prompt na primeira mensagem da sessão
+    historico = get_session_history(str(conversa_id))
+    if not historico.messages and system_prompt:
+        historico.add_message(SystemMessage(content=system_prompt))
+
+    # Chama o modelo
+    resposta = atendente.invoke(
+        [HumanMessage(content=mensagem_usuario)],
+        config=config
+    )
+
+    texto_resposta = resposta.content
+
+    # Salva resposta do atendente no banco
+    salvar_mensagem(conversa_id, "atendente", texto_resposta)
+
+    return texto_resposta
+
+# ── INSERÇÕES (sem mudança) ────────────────────────────
 
 def cadastrar_cliente(nome, email, senha_hash):
     with get_connection() as conn:
