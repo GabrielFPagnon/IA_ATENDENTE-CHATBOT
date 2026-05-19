@@ -4,6 +4,7 @@ from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
 from langchain_core.chat_history import InMemoryChatMessageHistory
 from langchain_core.runnables.history import RunnableWithMessageHistory
+from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 
 # ── CONEXÃO ───────────────────────────────────────────
 
@@ -11,9 +12,9 @@ def get_connection():
     return psycopg2.connect(
         host="localhost",
         port=5432,
-        database="chatbot",
+        database="",
         user="postgres",
-        password="postgres"
+        password=""
     )
 
 # ── MODELO LANGCHAIN ──────────────────────────────────
@@ -32,36 +33,68 @@ def get_session_history(session_id: str) -> InMemoryChatMessageHistory:
         store[session_id] = InMemoryChatMessageHistory()
     return store[session_id]
 
-# Chain com memória
-atendente = RunnableWithMessageHistory(llm, get_session_history)
+# Proteção contra Prompt Injection (MUDANÇA)
+prompt = ChatPromptTemplate.from_messages([
+    ("system", """Você é o melhor assistente de vendas da nossa loja.
+    
+    DIRETRIZES:
+    1. Recomende APENAS produtos listados no [CONTEXTO DE PRODUTOS].
+    2. Nunca invente preços, estoques ou produtos.
+    3. Seja conciso e direto.
+    
+    [CONTEXTO DE PRODUTOS]
+    {contexto_produtos}
+    """),
+    MessagesPlaceholder(variable_name="historico"),
+    ("human", "{mensagem_usuario}")
+])
 
-# ── FUNÇÃO PRINCIPAL DE CHAT ──────────────────────────
+chain = prompt | llm
 
-def chat(conversa_id: int, mensagem_usuario: str, system_prompt: str = None):
+atendente = RunnableWithMessageHistory(
+    chain,
+    get_session_history,
+    input_messages_key="mensagem_usuario",
+    history_messages_key="historico"
+)
+
+# ── FUNÇÃO PRINCIPAL DE CHAT ────────────────────────── (MUDANÇA)
+
+def extrair_palavras_chave(mensagem: str) -> list:
+    palavras_ignoradas = {"eu", "quero", "um", "uma", "o", "a", "de", "para"}
+    return [p for p in mensagem.lower().split() if p not in palavras_ignoradas]
+
+def chat(conversa_id: int, mensagem_usuario: str):
     """
-    Envia mensagem para o atendente e salva no banco.
-    Retorna a resposta do modelo.
+    Envia mensagem para o atendente, injetando dados reais do Postgres no prompt.
     """
-    # Salva mensagem do usuário no banco
     salvar_mensagem(conversa_id, "cliente", mensagem_usuario)
 
-    # Monta config da sessão
-    config = {"configurable": {"session_id": str(conversa_id)}}
-
-    # Injeta system prompt na primeira mensagem da sessão
-    historico = get_session_history(str(conversa_id))
-    if not historico.messages and system_prompt:
-        historico.add_message(SystemMessage(content=system_prompt))
+    # Busca no Postgres
+    palavras = extrair_palavras_chave(mensagem_usuario)
+    produtos_encontrados = buscar_produtos(palavras) if palavras else []
+    
+    # Formata o prompt
+    if produtos_encontrados:
+        texto_contexto = "\n".join([
+            f"- {p['nome']} | Categoria: {p['categoria']} | Preço: R${p['preco']} | Estoque: {p['quantidade_estoque']}"
+            for p in produtos_encontrados
+        ])
+    else:
+        texto_contexto = "Nenhum produto relevante encontrado no banco para esta mensagem."
 
     # Chama o modelo
+    config = {"configurable": {"session_id": str(conversa_id)}}
+    
     resposta = atendente.invoke(
-        [HumanMessage(content=mensagem_usuario)],
+        {
+            "mensagem_usuario": mensagem_usuario,
+            "contexto_produtos": texto_contexto # Injetando o Postgres no Prompt!
+        },
         config=config
     )
 
     texto_resposta = resposta.content
-
-    # Salva resposta do atendente no banco
     salvar_mensagem(conversa_id, "atendente", texto_resposta)
 
     return texto_resposta
