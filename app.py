@@ -1,183 +1,220 @@
-import psycopg2
-from psycopg2.extras import RealDictCursor
-from langchain_google_genai import ChatGoogleGenerativeAI
-from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
-from langchain_core.chat_history import InMemoryChatMessageHistory
-from langchain_core.runnables.history import RunnableWithMessageHistory
-from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
+"""
+app.py — Camada de API REST (FastAPI)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Expõe os recursos do atendente.py via HTTP.
 
-# ── CONEXÃO ───────────────────────────────────────────
+Endpoints:
+  POST /clientes                  → cadastrar cliente
+  POST /conversas                 → iniciar conversa
+  DELETE /conversas/{id}          → encerrar conversa
+  POST /conversas/{id}/mensagens  → enviar mensagem (chat principal)
+  GET  /clientes/{id}/historico   → buscar histórico
+  POST /produtos                  → cadastrar produto
+  GET  /produtos/buscar           → buscar produtos por palavras-chave
 
-def get_connection():
-    return psycopg2.connect(
-        host="localhost",
-        port=5432,
-        database="",
-        user="postgres",
-        password=""
-    )
+Parâmetros de chat:
+  modo        → tecnico | resumido | professor | detalhado | suporte_tecnico
+  tipo_prompt → simples | estruturado | especializado
 
-# ── MODELO LANGCHAIN ──────────────────────────────────
+Dual-AI:
+  Gemini 1.5 Flash → vendas, recomendações, catálogo
+  Groq Llama 3.3   → suporte técnico, comparações, análises
+"""
 
-llm = ChatGoogleGenerativeAI(
-    model="gemini-1.5-flash",
-    google_api_key="",
-    temperature=0.7
+from fastapi import FastAPI, HTTPException, Query
+from pydantic import BaseModel, EmailStr
+from typing import Optional
+
+from atendente import (
+    # Enums
+    ModoIA,
+    TipoPrompt,
+    # Chat
+    chat,
+    # CRUD
+    cadastrar_cliente,
+    iniciar_conversa,
+    encerrar_conversa,
+    salvar_mensagem,
+    cadastrar_produto,
+    # Buscas
+    buscar_produtos,
+    buscar_historico,
+    extrair_palavras_chave,
 )
 
-# Histórico por sessão (conversa_id → histórico)
-store = {}
+# ══════════════════════════════════════════════════════════════════
+# APP
+# ══════════════════════════════════════════════════════════════════
 
-def get_session_history(session_id: str) -> InMemoryChatMessageHistory:
-    if session_id not in store:
-        store[session_id] = InMemoryChatMessageHistory()
-    return store[session_id]
-
-# Proteção contra Prompt Injection (MUDANÇA)
-prompt = ChatPromptTemplate.from_messages([
-    ("system", """Você é o melhor assistente de vendas da nossa loja.
-    
-    DIRETRIZES:
-    1. Recomende APENAS produtos listados no [CONTEXTO DE PRODUTOS].
-    2. Nunca invente preços, estoques ou produtos.
-    3. Seja conciso e direto.
-    
-    [CONTEXTO DE PRODUTOS]
-    {contexto_produtos}
-    """),
-    MessagesPlaceholder(variable_name="historico"),
-    ("human", "{mensagem_usuario}")
-])
-
-chain = prompt | llm
-
-atendente = RunnableWithMessageHistory(
-    chain,
-    get_session_history,
-    input_messages_key="mensagem_usuario",
-    history_messages_key="historico"
+app = FastAPI(
+    title="Atendente Virtual — Dual AI",
+    description=(
+        "API de atendimento com Gemini (vendas) + Groq (suporte técnico). "
+        "Suporta 5 modos de IA e 3 tipos de prompt com proteções de segurança."
+    ),
+    version="2.0.0",
 )
 
-# ── FUNÇÃO PRINCIPAL DE CHAT ────────────────────────── (MUDANÇA)
 
-def extrair_palavras_chave(mensagem: str) -> list:
-    palavras_ignoradas = {"eu", "quero", "um", "uma", "o", "a", "de", "para"}
-    return [p for p in mensagem.lower().split() if p not in palavras_ignoradas]
+# ══════════════════════════════════════════════════════════════════
+# SCHEMAS
+# ══════════════════════════════════════════════════════════════════
 
-def chat(conversa_id: int, mensagem_usuario: str):
+class ClienteCreate(BaseModel):
+    nome: str
+    email: EmailStr
+    senha_hash: str
+
+
+class ConversaCreate(BaseModel):
+    cliente_id: int
+
+
+class MensagemCreate(BaseModel):
+    mensagem: str
+    modo: ModoIA = ModoIA.DETALHADO
+    tipo_prompt: TipoPrompt = TipoPrompt.ESTRUTURADO
+
+
+class ProdutoCreate(BaseModel):
+    nome: str
+    descricao: str
+    categoria: str
+    preco: float
+    quantidade_estoque: int
+
+
+# ══════════════════════════════════════════════════════════════════
+# CLIENTES
+# ══════════════════════════════════════════════════════════════════
+
+@app.post("/clientes", summary="Cadastrar novo cliente")
+def criar_cliente(body: ClienteCreate):
     """
-    Envia mensagem para o atendente, injetando dados reais do Postgres no prompt.
+    Cadastra um novo cliente no banco de dados.
     """
-    salvar_mensagem(conversa_id, "cliente", mensagem_usuario)
+    try:
+        cliente = cadastrar_cliente(body.nome, body.email, body.senha_hash)
+        return {"sucesso": True, "cliente": cliente}
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
-    # Busca no Postgres
-    palavras = extrair_palavras_chave(mensagem_usuario)
-    produtos_encontrados = buscar_produtos(palavras) if palavras else []
-    
-    # Formata o prompt
-    if produtos_encontrados:
-        texto_contexto = "\n".join([
-            f"- {p['nome']} | Categoria: {p['categoria']} | Preço: R${p['preco']} | Estoque: {p['quantidade_estoque']}"
-            for p in produtos_encontrados
-        ])
-    else:
-        texto_contexto = "Nenhum produto relevante encontrado no banco para esta mensagem."
 
-    # Chama o modelo
-    config = {"configurable": {"session_id": str(conversa_id)}}
-    
-    resposta = atendente.invoke(
-        {
-            "mensagem_usuario": mensagem_usuario,
-            "contexto_produtos": texto_contexto # Injetando o Postgres no Prompt!
-        },
-        config=config
-    )
+@app.get("/clientes/{cliente_id}/historico", summary="Histórico de mensagens do cliente")
+def historico_cliente(cliente_id: int):
+    """
+    Retorna todas as mensagens de todas as conversas de um cliente.
+    """
+    try:
+        historico = buscar_historico(cliente_id)
+        return {"sucesso": True, "historico": historico}
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
-    texto_resposta = resposta.content
-    salvar_mensagem(conversa_id, "atendente", texto_resposta)
 
-    return texto_resposta
+# ══════════════════════════════════════════════════════════════════
+# CONVERSAS
+# ══════════════════════════════════════════════════════════════════
 
-# ── INSERÇÕES (sem mudança) ────────────────────────────
+@app.post("/conversas", summary="Iniciar nova conversa")
+def nova_conversa(body: ConversaCreate):
+    """
+    Abre uma nova conversa para um cliente.
+    """
+    try:
+        conversa = iniciar_conversa(body.cliente_id)
+        return {"sucesso": True, "conversa": conversa}
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
-def cadastrar_cliente(nome, email, senha_hash):
-    with get_connection() as conn:
-        with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            cur.execute(
-                "INSERT INTO clientes (nome, email, senha) VALUES (%s, %s, %s) RETURNING *",
-                (nome, email, senha_hash)
-            )
-            return cur.fetchone()
 
-def iniciar_conversa(cliente_id):
-    with get_connection() as conn:
-        with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            cur.execute(
-                "INSERT INTO conversas (cliente_id) VALUES (%s) RETURNING *",
-                (cliente_id,)
-            )
-            return cur.fetchone()
+@app.delete("/conversas/{conversa_id}", summary="Encerrar conversa")
+def fechar_conversa(conversa_id: int):
+    """
+    Registra o encerramento de uma conversa.
+    """
+    try:
+        conversa = encerrar_conversa(conversa_id)
+        if not conversa:
+            raise HTTPException(status_code=404, detail="Conversa não encontrada.")
+        return {"sucesso": True, "conversa": conversa}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
-def encerrar_conversa(conversa_id):
-    with get_connection() as conn:
-        with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            cur.execute(
-                "UPDATE conversas SET encerrada_em = CURRENT_TIMESTAMP WHERE id = %s RETURNING *",
-                (conversa_id,)
-            )
-            return cur.fetchone()
 
-def salvar_mensagem(conversa_id, remetente, conteudo):
-    with get_connection() as conn:
-        with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            cur.execute(
-                "INSERT INTO mensagens (conversa_id, remetente, conteudo) VALUES (%s, %s, %s) RETURNING *",
-                (conversa_id, remetente, conteudo)
-            )
-            return cur.fetchone()
+# ══════════════════════════════════════════════════════════════════
+# CHAT — endpoint principal
+# ══════════════════════════════════════════════════════════════════
 
-def registrar_recomendacao(conversa_id, produto_id, mensagem_id):
-    with get_connection() as conn:
-        with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            cur.execute(
-                "INSERT INTO recomendacoes (conversa_id, produto_id, mensagem_id) VALUES (%s, %s, %s) RETURNING *",
-                (conversa_id, produto_id, mensagem_id)
-            )
-            return cur.fetchone()
+@app.post("/conversas/{conversa_id}/mensagens", summary="Enviar mensagem ao atendente")
+def enviar_mensagem(conversa_id: int, body: MensagemCreate):
+    """
+    Envia uma mensagem e recebe a resposta da IA.
 
-def cadastrar_produto(nome, descricao, categoria, preco, quantidade_estoque):
-    with get_connection() as conn:
-        with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            cur.execute(
-                "INSERT INTO produtos (nome, descricao, categoria, preco, quantidade_estoque) VALUES (%s, %s, %s, %s, %s) RETURNING *",
-                (nome, descricao, categoria, preco, quantidade_estoque)
-            )
-            return cur.fetchone()
-        
-# ── BUSCAS ──────────────────────────────────────────
+    **Modos disponíveis:**
+    - `tecnico` — terminologia precisa, specs e unidades
+    - `resumido` — máximo 2-3 frases, direto ao ponto
+    - `professor` — explica como para leigos, usa analogias
+    - `detalhado` — análise completa com prós, contras e recomendação
+    - `suporte_tecnico` — diagnóstico e solução passo a passo (sempre usa Groq)
 
-def buscar_produtos(palavras_chave):
-    with get_connection() as conn:
-        with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            filtros = " OR ".join(
-                [f"descricao ILIKE %s OR categoria ILIKE %s" for _ in palavras_chave]
-            )
-            valores = [val for p in palavras_chave for val in (f"%{p}%", f"%{p}%")]
-            cur.execute(
-                f"SELECT * FROM produtos WHERE ({filtros}) AND quantidade_estoque > 0 AND ativo = TRUE",
-                valores
-            )
-            return cur.fetchall()
+    **Tipos de prompt:**
+    - `simples` — estrutura mínima, resposta direta
+    - `estruturado` — persona Sofia + regras + catálogo
+    - `especializado` — chain-of-thought + few-shot + restrições rígidas
 
-def buscar_historico(cliente_id):
-    with get_connection() as conn:
-        with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            cur.execute("""
-                SELECT m.remetente, m.conteudo, m.enviada_em
-                FROM mensagens m
-                JOIN conversas c ON c.id = m.conversa_id
-                WHERE c.cliente_id = %s
-                ORDER BY m.enviada_em ASC
-            """, (cliente_id,))
-            return cur.fetchall()
+    **Roteamento dual-AI:**
+    - Gemini → perguntas de vendas, recomendações, catálogo
+    - Groq → suporte técnico, comparações, análises técnicas
+    """
+    try:
+        resultado = chat(
+            conversa_id=conversa_id,
+            mensagem_usuario=body.mensagem,
+            modo=body.modo,
+            tipo_prompt=body.tipo_prompt,
+        )
+        return {"sucesso": True, **resultado}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ══════════════════════════════════════════════════════════════════
+# PRODUTOS
+# ══════════════════════════════════════════════════════════════════
+
+@app.post("/produtos", summary="Cadastrar produto")
+def criar_produto(body: ProdutoCreate):
+    """
+    Cadastra um novo produto no catálogo.
+    """
+    try:
+        produto = cadastrar_produto(
+            body.nome,
+            body.descricao,
+            body.categoria,
+            body.preco,
+            body.quantidade_estoque,
+        )
+        return {"sucesso": True, "produto": produto}
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.get("/produtos/buscar", summary="Buscar produtos por palavras-chave")
+def buscar(q: str = Query(..., description="Termos de busca separados por espaço")):
+    """
+    Busca produtos ativos no banco por palavras-chave.
+    Ignora stop words automaticamente.
+    """
+    try:
+        palavras = extrair_palavras_chave(q)
+        if not palavras:
+            return {"sucesso": True, "produtos": [], "aviso": "Nenhuma palavra-chave relevante encontrada."}
+        produtos = buscar_produtos(palavras)
+        return {"sucesso": True, "total": len(produtos), "produtos": produtos}
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
