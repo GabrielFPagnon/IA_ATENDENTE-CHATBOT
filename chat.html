@@ -536,7 +536,7 @@
 
     <div class="field">
       <label>Nome</label>
-      <input type="text" id="setup-nome" placeholder="Seu nome completo" />
+      <input type="text" id="setup-nome" placeholder="Seu nome (só para novo cadastro)" />
     </div>
     <div class="field">
       <label>E-mail</label>
@@ -638,8 +638,8 @@
 
     errEl.style.display = 'none';
 
-    if (!nome || !email || !senha) {
-      mostrarErroSetup('Preencha todos os campos.');
+    if (!email || !senha) {
+      mostrarErroSetup('Preencha e-mail e senha.');
       return;
     }
 
@@ -647,38 +647,64 @@
     btn.textContent = 'Aguarde...';
 
     try {
-      // Criar cliente
-      const r1 = await fetch(`${API}/clientes`, {
+      // 1. Tenta login primeiro
+      const rLogin = await fetch(`${API}/clientes/login`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email, senha_hash: senha }),
+      });
+      const dLogin = await rLogin.json();
+
+      if (rLogin.ok) {
+        // Login ok — usa cliente e conversa já retornados
+        clienteId  = dLogin.cliente.id;
+        conversaId = dLogin.conversa.id;
+        abrirChat();
+        return;
+      }
+
+      // 2. Login falhou — tenta cadastrar (novo usuário)
+      if (!nome) {
+        mostrarErroSetup('Usuário não encontrado. Preencha o nome para criar uma conta.');
+        btn.disabled = false;
+        btn.textContent = 'Entrar e Iniciar Chat';
+        return;
+      }
+
+      const rCad = await fetch(`${API}/clientes`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ nome, email, senha_hash: senha }),
       });
-      const d1 = await r1.json();
-      if (!r1.ok) throw new Error(d1.detail || 'Erro ao cadastrar cliente.');
-      clienteId = d1.cliente.id;
+      const dCad = await rCad.json();
+      if (!rCad.ok) throw new Error(dCad.detail || 'Erro ao cadastrar cliente.');
+      clienteId = dCad.cliente.id;
 
       // Iniciar conversa
-      const r2 = await fetch(`${API}/conversas`, {
+      const rConv = await fetch(`${API}/conversas`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ cliente_id: clienteId }),
       });
-      const d2 = await r2.json();
-      if (!r2.ok) throw new Error(d2.detail || 'Erro ao iniciar conversa.');
-      conversaId = d2.conversa.id;
+      const dConv = await rConv.json();
+      if (!rConv.ok) throw new Error(dConv.detail || 'Erro ao iniciar conversa.');
+      conversaId = dConv.conversa.id;
 
-      // Atualizar UI
-      document.getElementById('session-info').textContent = `#${conversaId}`;
-      document.getElementById('setup-overlay').style.display = 'none';
-      document.getElementById('msg-input').disabled = false;
-      document.getElementById('send-btn').disabled = false;
-      document.getElementById('msg-input').focus();
+      abrirChat();
 
     } catch (e) {
       mostrarErroSetup(e.message);
       btn.disabled = false;
       btn.textContent = 'Entrar e Iniciar Chat';
     }
+  }
+
+  function abrirChat() {
+    document.getElementById('session-info').textContent = `#${conversaId}`;
+    document.getElementById('setup-overlay').style.display = 'none';
+    document.getElementById('msg-input').disabled = false;
+    document.getElementById('send-btn').disabled = false;
+    document.getElementById('msg-input').focus();
   }
 
   function mostrarErroSetup(msg) {

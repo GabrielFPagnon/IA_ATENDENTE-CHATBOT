@@ -230,3 +230,44 @@ def buscar(q: str = Query(..., description="Termos de busca separados por espaç
         return {"sucesso": True, "total": len(produtos), "produtos": serializar_lista(produtos)}
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
+
+
+# ══════════════════════════════════════════════════════════════════
+# LOGIN
+# ══════════════════════════════════════════════════════════════════
+
+class LoginBody(BaseModel):
+    email: EmailStr
+    senha_hash: str
+
+
+@app.post("/clientes/login", summary="Login do cliente")
+def login_cliente(body: LoginBody):
+    """
+    Busca o cliente pelo email e senha. Se encontrar, inicia uma nova conversa.
+    """
+    from atendente import get_connection
+    from psycopg2.extras import RealDictCursor
+
+    try:
+        with get_connection() as conn:
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                cur.execute(
+                    "SELECT * FROM clientes WHERE email = %s AND senha = %s",
+                    (body.email, body.senha_hash),
+                )
+                cliente = cur.fetchone()
+
+        if not cliente:
+            raise HTTPException(status_code=401, detail="Email ou senha inválidos.")
+
+        conversa = iniciar_conversa(cliente["id"])
+        return {
+            "sucesso": True,
+            "cliente": serializar(cliente),
+            "conversa": serializar(conversa),
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
