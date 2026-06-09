@@ -24,13 +24,10 @@ from enum import Enum
 
 
 # ══════════════════════════════════════════════════════════════════
-# CONFIGURAÇÃO — Chaves de API (ambas gratuitas)
-# Gemini : https://aistudio.google.com/app/apikey
-# Groq   : https://console.groq.com/keys
+# CONFIGURAÇÕES DE API
 # ══════════════════════════════════════════════════════════════════
-
-GEMINI_API_KEY = ""   # ← cole aqui
-GROQ_API_KEY   = ""   # ← cole aqui
+GEMINI_API_KEY = ""   
+GROQ_API_KEY   = ""  
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -61,7 +58,7 @@ def get_connection():
         port=5432,
         database="chatbot",
         user="postgres",
-        password="vitor2006"
+        password="postgres"
     )
 
 
